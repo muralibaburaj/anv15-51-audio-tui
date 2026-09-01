@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly supported_model="ANV15-51"
+product_name=$(cat /sys/class/dmi/id/product_name 2>/dev/null || true)
+
+if [[ $product_name != *"$supported_model"* ]]; then
+  printf 'Unsupported computer: %s\n' "${product_name:-unknown model}" >&2
+  printf 'This utility is intended for the Acer Nitro V 15 %s.\n' "$supported_model" >&2
+  exit 1
+fi
+
+for command in pactl jq gum omarchy-audio-output-set-default; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    printf 'Missing required command: %s\n' "$command" >&2
+    exit 1
+  fi
+done
+
+cards_json=$(timeout 3 pactl -f json list cards) || {
+  echo "Could not connect to PipeWire." >&2
+  exit 1
+}
+
+declare -a cards profiles kinds labels active
+
+while IFS=$'\t' read -r card profile current; do
+  [[ -n $card && -n $profile ]] || continue
+
+  if [[ $profile == *Speaker* ]]; then
+    kind="Speaker"
+    label="Laptop speakers"
+  else
+    kind="Headphones"
+    label="Wired headphones"
+  fi
+
+  is_active=false
+  if [[ $profile == "$current" ]]; then
+    is_active=true
+    label="● $label"
+  else
+    label="  $label"
+  fi
+
+  cards+=("$card")
+  profiles+=("$profile")
+  kinds+=("$kind")
+  labels+=("$label")
+  active+=("$is_active")
+done < <(
+  jq -r '
+    .[] as $card
+    | $card.profiles
+    | to_entries[]
+    | select(.value.available != false)
+    | select(.key | test("Speaker|Headphones"; "i"))
+    | [$card.name, .key, ($card.active_profile // "")]
+    | @tsv
+  ' <<<"$cards_json"
+)
+
+if ((${#labels[@]} == 0)); then
+  echo "No switchable speaker/headphone profiles were found." >&2
+  exit 1
+fi
+
+selection=$(printf '%s\n' "${labels[@]}" | gum choose \
+  --header "Audio output" \
+  --cursor-prefix "› " \
+  --selected-prefix "✓ " \
+  --unselected-prefix "  ") || exit 0
+
+selected_index=-1
+for index in "${!labels[@]}"; do
+  if [[ ${labels[$index]} == "$selection" ]]; then
+    selected_index=$index
+    break
+  fi
+done
+
+if ((selected_index < 0)); then
+  echo "Could not determine the selected profile." >&2
+  exit 1
+fi
+
+if [[ ${active[$selected_index]} == true ]]; then
+  printf '%s is already active.\n' "${labels[$selected_index]#*● }"
+  exit 0
+fi
+
+card=${cards[$selected_index]}
+profile=${profiles[$selected_index]}
+kind=${kinds[$selected_index]}
+
+pactl set-card-profile "$card" "$profile"
+
+# WirePlumber creates the sink asynchronously after the UCM profile changes.
+sink_record=""
+for _ in {1..20}; do
+  sink_record=$(pactl -f json list sinks | jq -r --arg kind "$kind" '
+    [
+      .[]
+      | select((.name + " " + (.description // "")) | test($kind; "i"))
+      | [.index, .name]
+    ][0] // []
+    | @tsv
+  ')
+  [[ -n $sink_record ]] && break
+  sleep 0.1
+done
+
+if [[ -n $sink_record ]]; then
+  IFS=$'\t' read -r sink_index sink_name <<<"$sink_record"
+  omarchy-audio-output-set-default "$sink_index" "$sink_name"
+fi
+
+if [[ $kind == Speaker ]]; then
+  icon="volume-high"
+  message="Laptop speakers"
+else
+  icon="headphones"
+  message="Wired headphones"
+fi
+
+if command -v omarchy-osd >/dev/null 2>&1; then
+  omarchy-osd -i "$icon" -m "$message"
+fi
+
+printf 'Audio output: %s\n' "$message"
