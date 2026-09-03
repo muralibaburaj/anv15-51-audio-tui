@@ -39,9 +39,7 @@ while IFS=$'\t' read -r card profile current; do
   is_active=false
   if [[ $profile == "$current" ]]; then
     is_active=true
-    label="● $label"
-  else
-    label="  $label"
+    label="$label (active)"
   fi
 
   cards+=("$card")
@@ -86,7 +84,7 @@ if ((selected_index < 0)); then
 fi
 
 if [[ ${active[$selected_index]} == true ]]; then
-  printf '%s is already active.\n' "${labels[$selected_index]#*● }"
+  printf '%s is already active.\n' "${labels[$selected_index]% (active)}"
   exit 0
 fi
 
@@ -120,7 +118,9 @@ if [[ $kind == Speaker ]]; then
   icon="volume-high"
   message="Laptop speakers"
 else
-  icon="headphones"
+  # omarchy-osd renders unknown icon names literally. Use the same Nerd Font
+  # headphones glyph as Omarchy's audio panel instead.
+  icon="󰋋"
   message="Wired headphones"
 fi
 
